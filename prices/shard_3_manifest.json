@@ -1,0 +1,18 @@
+{
+ "shard": 3,
+ "shards": 8,
+ "universe_total": 3707,
+ "attempted": 463,
+ "ok": 463,
+ "empty": [],
+ "failed": [],
+ "total_rows": 1172288,
+ "rows_median": 2914.0,
+ "rows_min": 1,
+ "date_min": "2015-01-05",
+ "date_max": "2026-11-06",
+ "start": "2015-01-01",
+ "end_exclusive": "2026-11-07",
+ "generated_at": "2026-11-06T10:34:44.172699+00:00",
+ "elapsed_sec": 217.2
+}
