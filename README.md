@@ -19,6 +19,14 @@ zip ファイルとして格納している。ワークフローが実行時に�
     モデルを取得し、artifact_uri を実行環境のパスへ書き換える
   - `gha/run_nightly.sh` — 価格取込 (最新日から14日前〜今日を自動補完) → 書き出し
 - `.github/workflows/nightly-predict.yml` — 平日 19:05 JST 実行、失敗時は Issue を起票
+- `.github/workflows/backfill-prices.yml` — 全銘柄（3,707）の価格履歴を
+  8 シャード並列で取得する手動実行ワークフロー。各シャードの結果は
+  専用ブランチ `price-data-shard-<i>`（parquet + manifest、orphan 単一
+  コミット）に保存する。価格データの保存先は HF の保管庫ではなくこの
+  リポジトリのブランチ（2026-11-06 決定の案B）
+  - `gha/backfill_shard.py` — シャード担当分の価格履歴を取得して parquet 化
+  - `gha/universe_master.csv` — 母集団マスタ（JPX 公式一覧 2026-09-30 時点、
+    東証の内国株式 3,707 銘柄、ETF・REIT 除外）
 
 ## 必要な Secrets
 
