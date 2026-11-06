@@ -1,0 +1,68 @@
+name: backfill-prices
+
+# 全銘柄 (3,707) の価格履歴を 8 シャード並列で取得し、各シャードの結果を
+# 専用ブランチ price-data-shard-<i> へ保存する (2026-11-06 決定の案B)。
+# 手動 dispatch のみ。1シャードは orphan 単一コミットで作り直すため、
+# ブランチは肥大化しない。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack code bundles
+        run: |
+          base64 -d code_backend.zip > /tmp/backend.zip
+          base64 -d code_rest.zip > /tmp/rest.zip
+          unzip -q /tmp/backend.zip
+          unzip -q /tmp/rest.zip
+          ls phase0 gha
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r phase1/backend/requirements.txt
+
+      - name: Fetch price history (shard ${{ matrix.shard }})
+        run: |
+          python gha/backfill_shard.py \
+            --shard ${{ matrix.shard }} --shards 8 --out-dir out
+
+      - name: Publish shard to price-data-shard-${{ matrix.shard }} branch
+        run: |
+          cp out/prices.parquet /tmp/prices.parquet
+          cp out/manifest.json /tmp/manifest.json
+          git checkout --orphan shard-tmp
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p prices
+          cp /tmp/prices.parquet prices/shard_${{ matrix.shard }}.parquet
+          cp /tmp/manifest.json prices/shard_${{ matrix.shard }}_manifest.json
+          git add prices/
+          git -c user.name="actions-bot" -c user.email="actions@github.com" \
+            commit -m "price history shard ${{ matrix.shard }} $(date +%F)"
+          git branch -D price-data-shard-${{ matrix.shard }} 2>/dev/null || true
+          git branch -m price-data-shard-${{ matrix.shard }}
+          git push -f origin price-data-shard-${{ matrix.shard }}
+
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "backfill-prices shard ${{ matrix.shard }} failed $(date +%F)" \
+            --body "The price backfill workflow failed (shard ${{ matrix.shard }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
