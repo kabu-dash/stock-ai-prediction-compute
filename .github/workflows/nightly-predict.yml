@@ -1,0 +1,71 @@
+name: nightly-predict
+
+# 平日 19:05 JST (= 10:05 UTC) に全500銘柄の予測+注目度を計算し、
+# 結果 data.json を publish-data ブランチへ保存する。公開ページへの反映は
+# VM 側の引き取り役 (検証つき) が行うため、このワークフローは HF の鍵を持たない。
+on:
+  schedule:
+    - cron: "5 10 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # コードは連携ツールの制約で base64 化した zip として置いてあるため、
+      # ここで復号して展開する (code_backend.zip / code_rest.zip)。
+      - name: Unpack code bundles
+        run: |
+          base64 -d code_backend.zip > /tmp/backend.zip
+          base64 -d code_rest.zip > /tmp/rest.zip
+          unzip -q /tmp/backend.zip
+          unzip -q /tmp/rest.zip
+          ls phase1 phase0 gha
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r phase1/backend/requirements.txt
+          pip install huggingface_hub
+
+      - name: Download artifacts (DB snapshot + model)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN_READ }}
+        run: python gha/prepare.py
+
+      - name: Ingest prices and export predictions
+        run: bash gha/run_nightly.sh
+
+      - name: Publish data.json to publish-data branch
+        run: |
+          cp out/data.json /tmp/data.json
+          git checkout --orphan publish-tmp
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p out
+          cp /tmp/data.json out/data.json
+          date -Is > out/generated_by_actions.txt
+          git add out/data.json out/generated_by_actions.txt
+          git -c user.name="actions-bot" -c user.email="actions@github.com" \
+            commit -m "nightly predictions $(date +%F)"
+          git branch -D publish-data 2>/dev/null || true
+          git branch -m publish-data
+          git push -f origin publish-data
+
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "nightly-predict failed $(date +%F)" \
+            --body "The nightly prediction workflow failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
