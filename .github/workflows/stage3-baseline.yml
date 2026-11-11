@@ -1,0 +1,127 @@
+name: stage3-baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "pilot = fold0/shard0/100 codes, fold = one full fold, all = 6 folds + aggregate"
+        type: choice
+        options: [pilot, fold, all]
+        default: pilot
+      fold:
+        description: "fold index for mode=fold"
+        type: choice
+        options: ["0", "1", "2", "3", "4", "5"]
+        default: "0"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        fold: ${{ fromJSON(inputs.mode == 'all' && '[0,1,2,3,4,5]' || format('[{0}]', inputs.fold)) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies (versions pinned to the verified local env)
+        run: |
+          pip install "pandas==2.1.4" "numpy<2" "lightgbm==4.7.0" "arch==8.0.0" \
+            "scikit-learn==1.9.1" pyarrow exchange-calendars huggingface_hub
+      - name: Unpack code bundles (poc sources live in code_rest.zip, base64 text)
+        run: |
+          mkdir -p bundle
+          base64 -d code_rest.zip > bundle/code_rest_real.zip
+          unzip -o bundle/code_rest_real.zip -d bundle > /dev/null
+          ls bundle/phase0/src/poc/
+      - name: Stage code (stage3 runner + poc) into the layout the runner expects
+        run: |
+          # runner resolves: <base>/stage3/*.py, <base>/phase0/src, data under <base>
+          mkdir -p work
+          cp -r bundle/phase0 work/phase0
+          cp -r stage3_code work/stage3
+          ls work/phase0/src/poc | head; ls work/stage3
+      - name: Download panel and price shards from the HF dataset repo
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN_PANEL_READ }}
+        run: |
+          python - << 'PYEOF'
+          import os
+          from huggingface_hub import snapshot_download
+          p = snapshot_download(
+              repo_id="soradash/stock-ai-prediction-panel",
+              repo_type="dataset",
+              local_dir="hf_panel",
+              token=os.environ["HF_TOKEN"],
+          )
+          print("downloaded to", p)
+          PYEOF
+          mkdir -p work/phase3/data/full work/full_universe_prices
+          cp hf_panel/panel_full_shard_*.parquet hf_panel/panel_full_manifest.json work/phase3/data/full/
+          for i in 0 1 2 3 4 5 6 7; do
+            mkdir -p work/full_universe_prices/shard_$i/prices
+            cp hf_panel/prices/shard_$i.parquet work/full_universe_prices/shard_$i/prices/shard_$i.parquet
+          done
+          du -sh work/phase3/data/full work/full_universe_prices
+      - name: Run one fold
+        working-directory: work
+        run: |
+          EXTRA=""
+          if [ "${{ inputs.mode }}" = "pilot" ]; then EXTRA="--shards 0 --max-codes 100"; fi
+          echo "fold=${{ matrix.fold }} extra=$EXTRA"
+          python stage3/run_stage3.py --fold ${{ matrix.fold }} --out-dir runs/full $EXTRA
+      - name: Upload fold outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage3-fold-${{ matrix.fold }}-${{ inputs.mode }}
+          path: work/runs/full/fold${{ matrix.fold }}
+          retention-days: 14
+
+  aggregate:
+    if: inputs.mode == 'all'
+    needs: run
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install "pandas==2.1.4" "numpy<2" pyarrow "scipy" "scikit-learn==1.9.1" exchange-calendars
+      - name: Download all fold artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stage3-fold-*-all
+          path: runs/full
+          merge-multiple: false
+      - name: Arrange fold directories
+        run: |
+          # artifacts arrive as runs/full/stage3-fold-<k>-all/ = former fold<k> contents
+          mkdir -p agg_in
+          for k in 0 1 2 3 4 5; do
+            mkdir -p agg_in/fold$k
+            cp -r runs/full/stage3-fold-$k-all/* agg_in/fold$k/
+          done
+          ls agg_in/fold0
+      - name: Aggregate
+        run: |
+          # aggregate imports poc.evaluation via phase0/src on sys.path (s3common)
+          mkdir -p bundle
+          base64 -d code_rest.zip > bundle/code_rest_real.zip
+          unzip -o bundle/code_rest_real.zip -d bundle > /dev/null
+          mkdir -p stage3_run && cp -r stage3_code/* stage3_run/
+          cp -r bundle/phase0 stage3_run/phase0
+          python stage3_run/aggregate_stage3.py --runs-dir agg_in --out-dir aggregate_out
+      - name: Upload aggregate results
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage3-aggregate
+          path: aggregate_out
+          retention-days: 30
